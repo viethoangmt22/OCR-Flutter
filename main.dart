@@ -4,6 +4,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
 import 'tcp_service.dart';
 
 void main() {
@@ -35,10 +36,15 @@ class _OcrFromGalleryPageState extends State<OcrFromGalleryPage> {
   final ImagePicker _picker = ImagePicker();
   final TextRecognizer _recognizer =
       TextRecognizer(script: TextRecognitionScript.latin);
+  final BarcodeScanner _barcodeScanner = BarcodeScanner(
+    formats: [BarcodeFormat.qrCode],
+  );
   final TcpService _tcpService = TcpService();
 
   File? _image;
   RecognizedText? _recognizedText;
+  List<Barcode> _barcodes = [];
+  String _qrText = '';
   bool _working = false;
   Size _imageSize = Size.zero;
   
@@ -55,15 +61,30 @@ class _OcrFromGalleryPageState extends State<OcrFromGalleryPage> {
       _working = true;
       _image = File(picked.path);
       _recognizedText = null;
+      _barcodes = [];
+      _qrText = '';
     });
 
     final inputImage = InputImage.fromFilePath(picked.path);
-    final result = await _recognizer.processImage(inputImage);
+    final results = await Future.wait([
+      _recognizer.processImage(inputImage),
+      _barcodeScanner.processImage(inputImage),
+    ]);
+
+    final result = results[0] as RecognizedText;
+    final barcodes = results[1] as List<Barcode>;
+    final qrText = barcodes
+        .map((b) => b.rawValue)
+        .where((value) => value != null && value!.trim().isNotEmpty)
+        .map((value) => value!.trim())
+        .toList();
 
     _imageSize = await _getImageSize(_image!);
 
     setState(() {
       _recognizedText = result;
+      _barcodes = barcodes;
+      _qrText = qrText.join('\n');
       _working = false;
     });
   }
@@ -87,17 +108,27 @@ class _OcrFromGalleryPageState extends State<OcrFromGalleryPage> {
   @override
   void dispose() {
     _recognizer.close();
+    _barcodeScanner.close();
     _tcpService.dispose();
     _ipController.dispose();
     _portController.dispose();
     super.dispose();
   }
 
+  String get _combinedText {
+    final ocr = _recognizedText?.text.trim() ?? '';
+    final qr = _qrText.trim();
+    if (ocr.isEmpty && qr.isEmpty) return '';
+    if (qr.isEmpty) return ocr;
+    if (ocr.isEmpty) return 'QR:\n$qr';
+    return '$ocr\n\nQR:\n$qr';
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('OCR ảnh từ Gallery'),
+        title: const Text('OCR + QR từ Gallery'),
         actions: [
           IconButton(
             icon: const Icon(Icons.photo),
@@ -157,7 +188,7 @@ class _OcrFromGalleryPageState extends State<OcrFromGalleryPage> {
           Expanded(
             child: SingleChildScrollView(
               child: Text(
-                _recognizedText?.text ?? '',
+                _combinedText,
                 style: const TextStyle(color: Colors.white),
               ),
             ),
@@ -168,8 +199,8 @@ class _OcrFromGalleryPageState extends State<OcrFromGalleryPage> {
             child: ElevatedButton.icon(
               icon: const Icon(Icons.send),
               label: const Text('Gửi text'),
-              onPressed: (_recognizedText?.text.isNotEmpty ?? false) && _tcpService.isConnected
-                  ? () => _tcpService.sendText(_recognizedText!.text)
+              onPressed: _combinedText.isNotEmpty && _tcpService.isConnected
+                  ? () => _tcpService.sendText(_combinedText)
                   : null,
             ),
           ),
